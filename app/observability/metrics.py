@@ -162,8 +162,7 @@ class MetricsCollector:
             return (0, 0, 0)
 
         def _pct(pct: float) -> int:
-            idx = int(len(samples) * pct)
-            idx = min(idx, len(samples) - 1)
+            idx = min(int(len(samples) * pct + 0.5), len(samples) - 1)
             return samples[idx]
 
         return (_pct(0.50), _pct(0.95), _pct(0.99))
