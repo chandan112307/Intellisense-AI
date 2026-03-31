@@ -21,8 +21,11 @@ from app.api.routes.evilearn_router import router as evilearn_router
 from app.api.routes.admin_router import router as admin_router
 from app.api.routes.admin_storage_router import router as admin_storage_router
 from app.api.routes.student_knowledge_router import router as student_knowledge_router
+from app.api.routes.feedback_router import router as feedback_router
+from app.api.routes.metrics_router import router as metrics_router
 
 from app.core.logging import log_info, log_error
+from app.scalability.rate_limiter import get_rate_limiter
 auth_scheme = APIKeyHeader(name="Authorization", auto_error=False)
 app = FastAPI(
     title="IntelliSense AI — Hybrid Agentic RAG Backend",
@@ -37,6 +40,8 @@ app = FastAPI(
         {"name": "evilearn", "description": "EviLearn: Hybrid Verification & Storage-Efficient RAG"},
         {"name": "admin", "description": "Admin Dashboard & System Management"},
         {"name": "student-knowledge", "description": "Student Knowledge Ingestion & Retrieval"},
+        {"name": "feedback", "description": "User Feedback Loop System"},
+        {"name": "observability", "description": "System Observability & Metrics"},
     ]
 )
 
@@ -58,6 +63,37 @@ app.include_router(evilearn_router)
 app.include_router(admin_router)
 app.include_router(admin_storage_router) # Added include_router
 app.include_router(student_knowledge_router)
+app.include_router(feedback_router)
+app.include_router(metrics_router)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Rate limiting middleware using token-bucket algorithm."""
+    # Skip rate limiting for health checks and docs
+    skip_paths = {"/health", "/", "/docs", "/openapi.json", "/redoc"}
+    if request.url.path in skip_paths:
+        return await call_next(request)
+
+    # Extract user_id from Authorization header if present
+    user_id = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        try:
+            from app.core.auth_utils import decode_jwt_token
+            decoded = decode_jwt_token(auth_header.replace("Bearer ", ""))
+            if decoded:
+                user_id = decoded.get("user_id")
+        except Exception:
+            pass
+
+    limiter = get_rate_limiter()
+    allowed, reason = limiter.check_rate_limit(user_id)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Rate limit exceeded", "reason": reason},
+        )
+    return await call_next(request)
 
 def custom_openapi():
     if app.openapi_schema:
