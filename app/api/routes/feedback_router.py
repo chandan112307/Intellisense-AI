@@ -17,6 +17,7 @@ from app.feedback.feedback_store import (
     get_retrieval_boost_from_feedback,
     store_feedback,
 )
+from app.intelligence.unified_learning import get_unified_learning
 
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 
@@ -58,6 +59,7 @@ class RetrievalBoostsResponse(BaseModel):
 async def submit_feedback(payload: FeedbackSubmitRequest):
     """Submit user feedback for a query/response pair."""
     try:
+        # Store in legacy feedback_store for backward compatibility
         feedback_id = store_feedback(
             user_id=payload.user_id,
             query=payload.query,
@@ -67,6 +69,21 @@ async def submit_feedback(payload: FeedbackSubmitRequest):
             feedback_text=payload.feedback_text,
             confidence_score=payload.confidence_score or 0.0,
         )
+        # Also store in Unified Learning System for integrated improvement
+        try:
+            learning = get_unified_learning()
+            learning.store_feedback(
+                user_id=payload.user_id,
+                query=payload.query,
+                response=payload.response,
+                feedback_type=payload.feedback_type,
+                chunk_ids=payload.chunk_ids,
+                feedback_text=payload.feedback_text or "",
+                confidence_score=payload.confidence_score or 0.0,
+            )
+        except Exception as ule:
+            log_info(f"Unified learning feedback skipped: {ule}")
+
         log_info(f"Feedback submitted: id={feedback_id} user={payload.user_id}")
         return FeedbackSubmitResponse(status="ok", feedback_id=feedback_id)
     except ValueError as e:

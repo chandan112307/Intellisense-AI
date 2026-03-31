@@ -52,6 +52,15 @@ from app.rag.query_expander import rewrite_for_retry
 from app.core.config import CONTEXT_VERIFICATION_ENABLED, GROUNDED_MODE_THRESHOLD, FAILURE_PREDICTION_ENABLED
 from app.rag.failure_predictor import predict_failure
 
+# ── Integrated Intelligence Systems ──
+from app.intelligence.decision_engine import DecisionEngine, PipelineDecision
+from app.intelligence.unified_learning import get_unified_learning
+from app.intelligence.user_profile import get_user_profile, get_adaptive_params, record_interaction
+from app.observability.metrics import record_query as record_metrics
+from app.cost.tracker import CostTracker, record_usage, select_model as cost_select_model
+from app.reasoning.engine import needs_multi_step, reason as run_reasoning
+from app.strategy.response_strategy import build_strategy_prompt_prefix, ResponseStrategy
+
 
 class PipelineControllerAgent:
     def __init__(
@@ -87,6 +96,8 @@ class PipelineControllerAgent:
         self.default_retrievers = DEFAULT_RETRIEVERS
         self.default_model = DEFAULT_MODEL_NAME
         self.default_max_tokens = DEFAULT_MAX_OUTPUT_TOKENS
+        self.decision_engine = DecisionEngine()
+        self.learning_system = get_unified_learning()
 
     async def run(
         self,
@@ -103,8 +114,43 @@ class PipelineControllerAgent:
         warnings: List[str] = []
         trace: Dict[str, Any] = {}
 
-        # Model selection
-        model_name = model_name or self.default_model
+        # ── DECISION ENGINE: Central intelligence decisions ──
+        try:
+            user_profile = get_user_profile(user_id)
+            knowledge_level = user_profile.get("knowledge_level", "intermediate")
+            adaptive_params = get_adaptive_params(user_id)
+        except Exception:
+            knowledge_level = "intermediate"
+            adaptive_params = {"top_k": 5, "complexity": "moderate", "add_explanations": False}
+
+        try:
+            cost_tracker = CostTracker()
+            budget_status = cost_tracker.get_budget_status()
+            budget_pct = 100.0 - budget_status.get("utilization_pct", 0.0)
+        except Exception:
+            budget_pct = 100.0
+
+        decision = self.decision_engine.decide(
+            query=query,
+            user_id=user_id,
+            knowledge_level=knowledge_level,
+            preferences=preferences if isinstance(preferences, dict) else {},
+            budget_remaining_pct=budget_pct,
+        )
+
+        # Apply decision engine outputs
+        model_name = model_name or decision.model_name
+
+        trace["decision_engine"] = {
+            "model": decision.model_name,
+            "needs_reasoning": decision.needs_reasoning,
+            "reasoning_type": decision.reasoning_type,
+            "retrieval_strategy": decision.retrieval_strategy,
+            "response_mode": decision.response_mode,
+            "tool_needed": decision.tool_needed,
+            "complexity": decision.complexity,
+            "knowledge_level": knowledge_level,
+        }
 
         prefs = Preferences(
             response_style=preferences.get("response_style", "concise"),
@@ -262,7 +308,18 @@ class PipelineControllerAgent:
                 log_info(f"Conceptual query detected. Expanded query: '{effective_query}'")
         
         # Future: Use query_type to adjust retrieval strategy
-        # e.g. if query_type == QueryType.FACT_VERIFICATION -> enable_verification_agent = True
+        # ── Refine decision with query_type ──
+        decision = self.decision_engine.decide(
+            query=query,
+            user_id=user_id,
+            query_type=query_type_result.query_type.value,
+            intent=intent_result.intent.value,
+            knowledge_level=knowledge_level,
+            preferences=preferences if isinstance(preferences, dict) else {},
+            budget_remaining_pct=budget_pct,
+        )
+        trace["decision_engine"]["query_type"] = query_type_result.query_type.value
+        trace["decision_engine"]["intent"] = intent_result.intent.value
         
         # ======================
         # 2. RETRIEVAL (section-aware + subject-scoped)
@@ -518,18 +575,93 @@ class PipelineControllerAgent:
                 log_info(f"Failure prediction skipped: {e}")
 
         # ======================
-        # 3. SYNTHESIS
+        # 2.9 REASONING ENGINE (if decision engine says it's needed)
         # ======================
+        reasoning_result = None
+        if decision.needs_reasoning and len(self.retrieval_agent_output.chunks) > 0:
+            try:
+                reasoning_result = run_reasoning(
+                    query=effective_query,
+                    context_chunks=self.retrieval_agent_output.chunks,
+                )
+                trace["reasoning"] = {
+                    "is_multi_step": reasoning_result.is_multi_step,
+                    "steps_count": len(reasoning_result.steps),
+                    "confidence": reasoning_result.confidence,
+                    "reasoning_chain": reasoning_result.reasoning_chain[:500],
+                }
+                log_info(f"Reasoning complete: {len(reasoning_result.steps)} steps, confidence={reasoning_result.confidence:.3f}")
+            except Exception as e:
+                log_info(f"Reasoning engine skipped: {e}")
+
+        # ======================
+        # 2.10 RESPONSE STRATEGY (from decision engine)
+        # ======================
+        strategy_prefix = ""
+        try:
+            strategy = ResponseStrategy(
+                mode=decision.response_mode,
+                tone=decision.response_tone,
+                include_examples=decision.include_examples,
+                include_references=decision.include_references,
+                max_length_hint=decision.max_response_tokens,
+            )
+            strategy_prefix = build_strategy_prompt_prefix(strategy)
+            trace["response_strategy"] = {
+                "mode": decision.response_mode,
+                "tone": decision.response_tone,
+                "max_tokens": decision.max_response_tokens,
+            }
+        except Exception as e:
+            log_info(f"Strategy prefix skipped: {e}")
+
+        # ======================
+        # 2.11 TOOL EXECUTION (if needed)
+        # ======================
+        tool_result = None
+        if decision.tool_needed:
+            try:
+                from app.tools.tool_registry import get_default_registry
+                registry = get_default_registry()
+                tool_result = registry.execute_tool(decision.tool_needed, query)
+                if tool_result and tool_result.success:
+                    trace["tool_execution"] = {
+                        "tool": decision.tool_needed,
+                        "output": tool_result.output[:200],
+                        "success": True,
+                    }
+                    log_info(f"Tool executed: {decision.tool_needed} -> success")
+            except Exception as e:
+                log_info(f"Tool execution skipped: {e}")
+
+        # ======================
+        # 3. SYNTHESIS (with integrated intelligence)
+        # ======================
+        # Build enhanced query with reasoning chain and strategy prefix
+        synthesis_query = self.query_understanding_output.rewritten_query
+        if reasoning_result and reasoning_result.reasoning_chain:
+            synthesis_query = f"{strategy_prefix}\n\nReasoning context:\n{reasoning_result.reasoning_chain}\n\nOriginal query: {synthesis_query}"
+        elif strategy_prefix:
+            synthesis_query = f"{strategy_prefix}\n\n{synthesis_query}"
+
+        # Add tool output if available
+        if tool_result and tool_result.success:
+            synthesis_query += f"\n\nTool ({decision.tool_needed}) output: {tool_result.output}"
+
+        effective_max_tokens = decision.max_output_tokens
+        if isinstance(preferences, dict):
+            effective_max_tokens = preferences.get("max_tokens", decision.max_output_tokens)
+
         try:
             self.response_synthesizer_agent_input = SynthesisInput(
                 trace_id=self.retrieval_agent_output.trace_id,
                 user_id=user_id,
                 session_id=session_id,
-                query=self.query_understanding_output.rewritten_query,
+                query=synthesis_query,
                 conversation_history=conversation_history,
                 preferences=preferences,
                 model_name=model_name,
-                max_output_tokens=preferences.get("max_tokens", self.default_max_tokens),
+                max_output_tokens=effective_max_tokens,
                 retrieved_chunks=self.retrieval_agent_output.chunks,
                 grounded_only=grounded_only,
                 retrieval_confidence=retrieval_confidence_score,
@@ -556,17 +688,68 @@ class PipelineControllerAgent:
             self.response_synthesizer_agent_output.confidence = 0.0
 
         # ======================
-        # FINAL OUTPUT
+        # FINAL OUTPUT + POST-PIPELINE INTELLIGENCE
         # ======================
         latency_ms = int((time.time() - start_time) * 1000)
+        confidence = self.response_synthesizer_agent_output.confidence
+        success = confidence > 0.0 and "INSUFFICIENT" not in self.response_synthesizer_agent_output.answer
+
+        # ── Record to Unified Learning System ──
+        try:
+            chunk_types = list(set(
+                getattr(c, "section_type", None) or (getattr(c, "metadata", {}) or {}).get("section_type", "body")
+                for c in self.retrieval_agent_output.chunks[:10]
+            ))
+            self.learning_system.record_retrieval_outcome(
+                query=effective_query,
+                query_type=query_type_result.query_type.value if hasattr(query_type_result, "query_type") else "",
+                chunk_types=chunk_types,
+                confidence=confidence,
+                recommendation="proceed" if success else "retry",
+                outcome_quality=confidence,
+            )
+        except Exception as e:
+            log_info(f"Learning system record skipped: {e}")
+
+        # ── Record Observability Metrics ──
+        try:
+            record_metrics(
+                latency_ms=latency_ms,
+                success=success,
+                grounded_mode=grounded_only,
+                query_type=query_type_result.query_type.value if hasattr(query_type_result, "query_type") else "unknown",
+                tokens_used=self.response_synthesizer_agent_output.metrics.get("tokens", 0) if self.response_synthesizer_agent_output.metrics else 0,
+            )
+        except Exception as e:
+            log_info(f"Metrics recording skipped: {e}")
+
+        # ── Record Cost Tracking ──
+        try:
+            token_count = self.response_synthesizer_agent_output.metrics.get("tokens", 0) if self.response_synthesizer_agent_output.metrics else 0
+            if token_count > 0:
+                record_usage(model_name, token_count // 2, token_count // 2)
+        except Exception as e:
+            log_info(f"Cost tracking skipped: {e}")
+
+        # ── Record User Interaction for Adaptive Learning ──
+        try:
+            record_interaction(
+                user_id=user_id,
+                query=query,
+                topic=query_type_result.query_type.value if hasattr(query_type_result, "query_type") else "general",
+                was_correct=success,
+                difficulty=decision.complexity,
+            )
+        except Exception as e:
+            log_info(f"User interaction record skipped: {e}")
 
         final_payload = {
             "answer": self.response_synthesizer_agent_output.answer,
             "confidence": self.response_synthesizer_agent_output.confidence,
             "warnings": warnings + self.response_synthesizer_agent_output.warnings,
             "used_chunk_ids": self.response_synthesizer_agent_output.used_chunk_ids,
-            "retrieval_trace": trace["retrieval_trace"],
-            "query_understanding": trace["query_understanding"],
+            "retrieval_trace": trace.get("retrieval_trace", {}),
+            "query_understanding": trace.get("query_understanding", {}),
             "trace_id": self.response_synthesizer_agent_output.trace_id,
             "latency_ms": latency_ms,
             "raw_model_output": self.response_synthesizer_agent_output.raw_model_output,
