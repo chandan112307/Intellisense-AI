@@ -43,7 +43,7 @@ class UserProfileStore:
         if self._initialized:
             return
         self.db_path = db_path or USER_PROFILE_DB_PATH
-        os.makedirs(os.path.dirname(self.db_path) if os.path.dirname(self.db_path) else ".", exist_ok=True)
+        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         self._init_schema()
         self._initialized = True
         log_info(f"UserProfileStore initialized at {self.db_path}")
@@ -275,7 +275,7 @@ class UserProfileStore:
         if total < 5:
             return profile
 
-        accuracy = profile["correct_answers"] / total
+        accuracy = profile.get("correct_answers", 0) / total
         current = profile["knowledge_level"]
         promotion_order = list(VALID_KNOWLEDGE_LEVELS)
         idx = promotion_order.index(current)
