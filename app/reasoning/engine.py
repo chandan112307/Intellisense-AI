@@ -188,7 +188,7 @@ def decompose_query(query: str) -> List[str]:
 
     # Compound splitters
     parts = _COMPOUND_SPLITTERS.split(query)
-    parts = [p.strip().rstrip("?").strip() for p in parts if p.strip()]
+    parts = [p.strip().rstrip("?") for p in parts if p.strip()]
     if len(parts) >= 2:
         meaningful = [p for p in parts if len(p.split()) >= 3]
         if len(meaningful) >= 2:
