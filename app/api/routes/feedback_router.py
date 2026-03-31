@@ -81,8 +81,8 @@ async def submit_feedback(payload: FeedbackSubmitRequest):
                 feedback_text=payload.feedback_text or "",
                 confidence_score=payload.confidence_score or 0.0,
             )
-        except Exception as ule:
-            log_info(f"Unified learning feedback skipped: {ule}")
+        except Exception as learning_err:
+            log_info(f"Unified learning feedback skipped: {learning_err}")
 
         log_info(f"Feedback submitted: id={feedback_id} user={payload.user_id}")
         return FeedbackSubmitResponse(status="ok", feedback_id=feedback_id)

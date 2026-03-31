@@ -332,7 +332,7 @@ class PlannerTool(Tool):
         raw_parts = _SPLIT_PATTERN.split(goal)
         steps = [part.strip().rstrip(".") for part in raw_parts if part.strip()]
         # Capitalise each step
-        steps = [s[0].upper() + s[1:] if s else s for s in steps]
+        steps = [s[0].upper() + s[1:] if len(s) > 1 else s.upper() for s in steps]
         if not steps:
             steps = [goal.strip()]
         return steps

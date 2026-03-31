@@ -724,6 +724,9 @@ class PipelineControllerAgent:
             log_info(f"Metrics recording skipped: {e}")
 
         # ── Record Cost Tracking ──
+        # Note: token_count // 2 approximation splits total tokens equally between
+        # input and output. Actual ratios vary by query but this is sufficient for
+        # budget monitoring and model selection purposes.
         try:
             token_count = self.response_synthesizer_agent_output.metrics.get("tokens", 0) if self.response_synthesizer_agent_output.metrics else 0
             if token_count > 0:
