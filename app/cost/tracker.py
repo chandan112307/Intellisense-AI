@@ -55,6 +55,8 @@ class CostTracker:
     _lock = threading.Lock()
 
     def __init__(self) -> None:
+        if getattr(self, "_initialized", False):
+            return
         self._data_lock = threading.Lock()
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
@@ -62,6 +64,7 @@ class CostTracker:
         self.queries_tracked: int = 0
         self.cost_by_model: Dict[str, float] = {}
         self.cost_history: deque = deque(maxlen=_COST_HISTORY_LIMIT)
+        self._initialized = True
 
     @classmethod
     def get_instance(cls) -> "CostTracker":
