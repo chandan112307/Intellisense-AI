@@ -21,6 +21,7 @@ from app.api.routes.evilearn_router import router as evilearn_router
 from app.api.routes.admin_router import router as admin_router
 from app.api.routes.admin_storage_router import router as admin_storage_router
 from app.api.routes.student_knowledge_router import router as student_knowledge_router
+from app.api.routes.feedback_router import router as feedback_router
 
 from app.core.logging import log_info, log_error
 auth_scheme = APIKeyHeader(name="Authorization", auto_error=False)
@@ -37,6 +38,7 @@ app = FastAPI(
         {"name": "evilearn", "description": "EviLearn: Hybrid Verification & Storage-Efficient RAG"},
         {"name": "admin", "description": "Admin Dashboard & System Management"},
         {"name": "student-knowledge", "description": "Student Knowledge Ingestion & Retrieval"},
+        {"name": "feedback", "description": "User Feedback Loop System"},
     ]
 )
 
@@ -58,6 +60,7 @@ app.include_router(evilearn_router)
 app.include_router(admin_router)
 app.include_router(admin_storage_router) # Added include_router
 app.include_router(student_knowledge_router)
+app.include_router(feedback_router)
 
 def custom_openapi():
     if app.openapi_schema:
