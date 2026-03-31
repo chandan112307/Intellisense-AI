@@ -24,8 +24,12 @@
 16. [Results and Analysis](#16-results-and-analysis)
 17. [Limitations](#17-limitations)
 18. [Future Work](#18-future-work)
-19. [Quick Start](#19-quick-start)
-20. [License](#20-license)
+19. [Adaptive Intelligence Architecture](#19-adaptive-intelligence-architecture)
+20. [Decision Learning System](#20-decision-learning-system)
+21. [Feedback Loop System](#21-feedback-loop-system)
+22. [Self-Optimization Loop](#22-self-optimization-loop)
+23. [Quick Start](#23-quick-start)
+24. [License](#24-license)
 
 ---
 
@@ -454,36 +458,51 @@ The decision engine activates reasoning when:
 
 ### How Decisions Are Made
 
+The Decision Engine is **adaptive** — it consults the Unified Learning System
+to override static rules when historical data shows a better option.
+
 ```
                     ┌──────────────────────┐
                     │    Decision Engine    │
                     └──────────┬───────────┘
                                │
-              ┌────────────────┼────────────────┐
-              │                │                │
-              ▼                ▼                ▼
-      [User Profile]    [Query Analysis]  [Budget Status]
-     knowledge_level     query_type        remaining %
-     learning_style      complexity
-              │                │                │
-              └────────────────┼────────────────┘
+          ┌────────────────────┼────────────────────┐
+          │                    │                    │
+          ▼                    ▼                    ▼
+   [User Profile]       [Query Analysis]     [Budget Status]
+   knowledge_level       query_type           remaining %
+   learning_style        complexity
+          │                    │                    │
+          └────────────────────┼────────────────────┘
                                │
-           ┌───────────────────┼───────────────────┐
-           │           │           │           │
-           ▼           ▼           ▼           ▼
-      [Model]    [Reasoning]  [Strategy]    [Tools]
-    8b/70b/etc   single/multi  teach/exam  calc/code
+                               ▼
+                    ┌──────────────────────┐
+                    │  Learning System     │
+                    │  (Adaptive Override) │
+                    │                      │
+                    │ get_best_model()     │
+                    │ get_best_strategy()  │
+                    │ get_best_reasoning() │
+                    │ should_upgrade()     │
+                    └──────────┬───────────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          │           │           │           │
+          ▼           ▼           ▼           ▼
+     [Model]    [Reasoning]  [Strategy]    [Tools]
+   8b/70b/etc   single/multi  teach/exam  calc/code
 ```
 
 ### Model Selection Logic
 
-| Condition | Model Selected | Max Tokens |
-|---|---|---|
-| Budget < 10% | llama-3.1-8b-instant | 300 |
-| Simple query, low quality need | llama-3.1-8b-instant | 400 |
-| Complex or high quality | llama-3.1-70b-versatile | 600 |
-| Verification / fact-check | llama-3.1-70b-versatile | 600 |
-| Explicit user preference | As specified | 600 |
+| Priority | Condition | Model Selected | Max Tokens |
+|---|---|---|---|
+| 1 | Explicit user preference | As specified | 600 |
+| 2 | Budget < 10% | llama-3.1-8b-instant | 300 |
+| 3 | **Learned best model** (≥3 uses) | **Auto-selected from history** | 600 |
+| 4 | **Failure rate >30%** for query type | **Auto-upgrade to 70b** | 600 |
+| 5 | Complex query (static fallback) | llama-3.1-70b-versatile | 600 |
+| 6 | Simple query (static fallback) | llama-3.1-8b-instant | 400 |
 
 ### Strategy Selection
 
@@ -561,9 +580,10 @@ The decision engine activates reasoning when:
 #### Feedback (`/feedback`)
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/feedback/submit` | Submit thumbs up/down/correction |
+| POST | `/feedback/submit` | Submit thumbs up/down/correction (feeds into adaptive learning) |
 | GET | `/feedback/stats` | Get feedback statistics |
 | GET | `/feedback/retrieval-boosts` | Get chunk boost scores |
+| GET | `/feedback/learning-stats` | Get learning system statistics (decision outcomes, failures, etc.) |
 
 #### Student Knowledge (`/student-knowledge`)
 | Method | Endpoint | Description |
@@ -577,6 +597,7 @@ The decision engine activates reasoning when:
 |---|---|---|
 | GET | `/metrics/summary` | Full metrics snapshot |
 | GET | `/metrics/health` | System health status |
+| GET | `/metrics/adaptive-signals` | Active optimization signals (model upgrade, retrieval expansion) |
 | POST | `/metrics/reset` | Reset metrics (testing) |
 
 #### Admin (`/admin`)
@@ -634,6 +655,31 @@ The decision engine activates reasoning when:
 │ times_positive           │    │ frequency, avg_confidence│
 │ times_negative           │    │ avg_feedback_score       │
 │ avg_relevance, last_used │    │ last_seen, best_chunk_ids│
+└──────────────────────────┘    └──────────────────────────┘
+
+--- Adaptive Learning Tables (NEW) ---
+
+┌──────────────────────────┐    ┌──────────────────────────┐
+│    decision_outcomes     │    │    model_performance     │
+├──────────────────────────┤    ├──────────────────────────┤
+│ id (PK)                  │    │ model_name + query_type  │
+│ query_type, model_name   │    │   (composite PK)         │
+│ reasoning_type           │    │ total_uses, successes    │
+│ retrieval_strategy       │    │ avg_confidence           │
+│ response_mode            │    │ avg_feedback             │
+│ confidence, success      │    │ avg_latency_ms           │
+│ feedback_score           │    │ last_used                │
+│ latency_ms, timestamp    │    └──────────────────────────┘
+└──────────────────────────┘
+┌──────────────────────────┐    ┌──────────────────────────┐
+│     failure_events       │    │   reasoning_outcomes     │
+├──────────────────────────┤    ├──────────────────────────┤
+│ id (PK)                  │    │ id (PK)                  │
+│ query_type, failure_type │    │ query_type               │
+│ model_name               │    │ reasoning_type           │
+│ retrieval_strategy       │    │ steps_count              │
+│ confidence               │    │ confidence, success      │
+│ context_info, timestamp  │    │ timestamp                │
 └──────────────────────────┘    └──────────────────────────┘
 ```
 
@@ -892,7 +938,223 @@ The code execution tool is heavily restricted:
 
 ---
 
-## 19. Quick Start
+## 19. Adaptive Intelligence Architecture
+
+IntelliSense AI is not a static pipeline — it is a **self-improving system** that adapts its behavior based on historical outcomes. Every query creates learning signals that improve future decisions.
+
+### What Was Static → What Is Now Adaptive
+
+| Component | Before (Static) | After (Adaptive) |
+|---|---|---|
+| Model Selection | Fixed rules (8b for simple, 70b for complex) | Learned from model_performance table: auto-routes to best model per query type |
+| Retrieval Strategy | Fixed per knowledge level | Learned from decision_outcomes: auto-selects best strategy per query type |
+| top_k Parameter | Fixed values (3/5/8) | Adaptive: increases when historical confidence is low, decreases when high |
+| Reasoning Type | Fixed keyword detection | Learned from reasoning_outcomes: selects best reasoning approach per query type |
+| Confidence Thresholds | Static 0.70/0.35 | Learned from successful query patterns with exponential decay |
+| Failure Response | None | Failure events trigger model tier upgrades and retrieval expansion |
+
+### Adaptive Learning Architecture
+
+```
+┌───────────────────────────────────────────────────────────┐
+│                    Query Execution                         │
+│                                                           │
+│  User Query ──→ Decision Engine ──→ Pipeline ──→ Response │
+│                     ↑                    │                │
+│                     │                    ↓                │
+│              ┌──────┴──────────────────────┐              │
+│              │    Unified Learning System   │              │
+│              │                              │              │
+│              │  ┌─────────────────────────┐ │              │
+│              │  │  decision_outcomes      │ │              │
+│              │  │  (model, strategy,      │ │              │
+│              │  │   reasoning → success)  │ │              │
+│              │  └─────────────────────────┘ │              │
+│              │  ┌─────────────────────────┐ │              │
+│              │  │  model_performance      │ │              │
+│              │  │  (model × query_type    │ │              │
+│              │  │   → success_rate)       │ │              │
+│              │  └─────────────────────────┘ │              │
+│              │  ┌─────────────────────────┐ │              │
+│              │  │  failure_events         │ │              │
+│              │  │  (triggers upgrades)    │ │              │
+│              │  └─────────────────────────┘ │              │
+│              │  ┌─────────────────────────┐ │              │
+│              │  │  reasoning_outcomes     │ │              │
+│              │  │  (type → success_rate)  │ │              │
+│              │  └─────────────────────────┘ │              │
+│              └──────────────────────────────┘              │
+└───────────────────────────────────────────────────────────┘
+```
+
+### How the System Learns Over Time
+
+1. **Cold Start** (0-10 queries): Uses static rules for all decisions
+2. **Early Learning** (10-50 queries): Begins tracking outcomes, but insufficient data for adaptation
+3. **Adaptive Phase** (50+ queries): Learning system has enough data (≥3 per model/query type) to override static decisions
+4. **Optimized Phase** (200+ queries): System has learned optimal model, strategy, and reasoning for each query type
+
+---
+
+## 20. Decision Learning System
+
+### How Decisions Evolve
+
+Every pipeline execution records:
+- **What was decided**: model, reasoning type, retrieval strategy, response mode
+- **What happened**: confidence, success/failure, latency
+
+This creates a closed loop:
+
+```
+Query → DecisionEngine.decide() → Pipeline Execution → Outcome
+                ↑                                          │
+                │                                          ↓
+                └──── learning.record_decision_outcome() ──┘
+```
+
+### Decision Tables
+
+#### `decision_outcomes` — Raw decision log
+```
+| query_type | model_name | reasoning_type | retrieval_strategy | confidence | success | latency_ms |
+|------------|------------|----------------|--------------------|------------|---------|------------|
+| FACTUAL    | llama-8b   | single         | standard           | 0.85       | 1       | 200        |
+| COMPARATIVE| llama-70b  | comparison     | expanded           | 0.92       | 1       | 450        |
+| FACTUAL    | llama-8b   | single         | standard           | 0.30       | 0       | 180        |
+```
+
+#### `model_performance` — Aggregated model success rates
+```
+| model_name      | query_type  | total_uses | successes | avg_confidence |
+|-----------------|-------------|------------|-----------|----------------|
+| llama-8b        | FACTUAL     | 50         | 40        | 0.72           |
+| llama-70b       | FACTUAL     | 20         | 19        | 0.89           |
+| llama-70b       | COMPARATIVE | 30         | 28        | 0.91           |
+```
+
+### Automatic Routing
+
+When `get_best_model_for_query_type("FACTUAL")` is called:
+1. Query `model_performance` for entries with ≥3 uses
+2. Sort by success rate (successes / total_uses), then by avg_confidence
+3. Return the top model → **overrides static rules**
+
+---
+
+## 21. Feedback Loop System
+
+### Complete Flow: User → System → Adaptation
+
+```
+User submits feedback (thumbs_up / thumbs_down / correction)
+        │
+        ▼
+┌──────────────────────────┐
+│   POST /feedback/submit  │
+│                          │
+│  1. Legacy feedback_store│  ← Backward compatibility
+│  2. UnifiedLearningSystem│  ← Drives adaptation
+└──────────┬───────────────┘
+           │
+           ▼
+┌──────────────────────────────────────────────────┐
+│            Unified Learning System                │
+│                                                   │
+│  ┌─────────────────────┐  ┌─────────────────────┐│
+│  │ chunk_performance    │  │ query_patterns      ││
+│  │ times_positive ↑↓    │  │ avg_feedback_score  ││
+│  │ times_negative ↑↓    │  │ (rolling average)   ││
+│  └────────┬────────────┘  └────────┬────────────┘│
+│           │                        │              │
+│           ▼                        ▼              │
+│  ┌─────────────────────────────────────────────┐ │
+│  │         Decision Engine Adaptation          │ │
+│  │                                             │ │
+│  │  • get_retrieval_boosts() → chunk ranking   │ │
+│  │  • get_confidence_thresholds() → grounding  │ │
+│  │  • get_negative_chunk_ids() → filtering     │ │
+│  │  • should_upgrade_model() → model routing   │ │
+│  └─────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────┘
+```
+
+### What Feedback Changes
+
+| Feedback Type | Effect on System |
+|---|---|
+| `thumbs_up` | Boosts chunk scores, increases confidence threshold tolerance |
+| `thumbs_down` | Penalizes chunks, may trigger model upgrade for query type |
+| `correction` | Updates chunk performance, feeds into query pattern learning |
+
+### Feedback Impact Verification
+
+- **Chunk boost range**: 0.5 (heavily penalized) to 1.5 (highly trusted)
+- **Minimum observations**: 2 feedback events per chunk before boosts activate
+- **Negative threshold**: 3+ negative feedbacks → chunk flagged for filtering
+- **Model upgrade trigger**: >30% failure rate for query type → automatic tier upgrade
+
+---
+
+## 22. Self-Optimization Loop
+
+### Continuous Improvement Mechanism
+
+```
+┌─────────────────────────────────────────────────────┐
+│              Self-Optimization Loop                   │
+│                                                       │
+│   RUN ──→ EVALUATE ──→ ADJUST ──→ IMPROVE            │
+│    │                                    │             │
+│    └────────────────────────────────────┘             │
+│                                                       │
+│   Per-query cycle:                                    │
+│   1. RUN: Execute pipeline with current decisions     │
+│   2. EVALUATE: Measure confidence, success, latency   │
+│   3. ADJUST: Record outcomes to learning system       │
+│   4. IMPROVE: Next query benefits from updated data   │
+└─────────────────────────────────────────────────────┘
+```
+
+### Active Metrics Signals
+
+The metrics system doesn't just observe — it triggers auto-adjustments via `/metrics/adaptive-signals`:
+
+```json
+{
+  "sufficient_data": true,
+  "failure_rate": 0.15,
+  "grounded_rate": 0.25,
+  "model_upgrade_needed": false,
+  "expand_retrieval": false,
+  "reduce_latency": false,
+  "high_token_usage": false,
+  "p95_latency_ms": 3200
+}
+```
+
+| Signal | Trigger Condition | System Response |
+|---|---|---|
+| `model_upgrade_needed` | failure_rate > 20% | DecisionEngine switches to higher-tier model |
+| `expand_retrieval` | grounded_rate > 30% | Increase top_k, enable deep retrieval |
+| `reduce_latency` | p95 > 8000ms | Prefer faster model tier |
+| `high_token_usage` | avg tokens > 800/query | Reduce max_output_tokens |
+
+### Failure Learning
+
+Every failure is categorized and recorded:
+
+| Failure Type | Trigger | Learning Response |
+|---|---|---|
+| `low_confidence` | confidence < threshold | Increase retrieval, try better model |
+| `grounded_mode` | Context insufficient | Expand retrieval strategy |
+| `no_answer` | confidence = 0 | Flag query type for model upgrade |
+
+The system uses `should_upgrade_model(query_type)` to check if accumulated failures exceed 30%, automatically routing future queries of that type to a more capable model.
+
+---
+
+## 23. Quick Start
 
 ### Prerequisites
 - [Python 3.11+](https://www.python.org/)
@@ -957,7 +1219,7 @@ COVERAGE_GAP_FILL_ENABLED = True        # Missing concept retrieval
 
 ---
 
-## 20. License
+## 24. License
 
 MIT License
 
