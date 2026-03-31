@@ -24,7 +24,7 @@ import os
 import sqlite3
 import threading
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.core.logging import log_error, log_info, log_warning
@@ -100,7 +100,7 @@ def store_feedback(
     if feedback_type not in allowed_types:
         raise ValueError(f"feedback_type must be one of {allowed_types}")
 
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     conn = _get_conn()
     try:
         with _lock:
