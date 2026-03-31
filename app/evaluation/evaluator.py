@@ -41,6 +41,8 @@ class EvaluationResult:
     confidence_calibration_error: float
     latency_ms: int
     passed: bool
+    category: str = "unknown"
+    difficulty: str = "unknown"
 
 
 @dataclass
@@ -191,6 +193,8 @@ def evaluate_single(
             confidence_calibration_error=round(calibration, 4),
             latency_ms=latency_ms,
             passed=passed,
+            category=case.category,
+            difficulty=case.difficulty,
         )
 
         log_info(
@@ -241,14 +245,7 @@ def summarize_results(results: List[EvaluationResult]) -> EvaluationSummary:
     # Per-category breakdown
     by_category: dict = {}
     for r in results:
-        # Derive category from the original case; fall back to "unknown"
-        cat = getattr(r, "_category", "unknown")
-        # Since EvaluationResult doesn't carry category, we infer from the
-        # results list directly — callers can attach category via the query.
-        # Here we group by a simple heuristic: bucket the first word of the
-        # query.  A richer approach is provided by the caller passing metadata.
-        # For robustness we just bucket everything under "all".
-        by_category.setdefault("all", []).append(r)
+        by_category.setdefault(r.category, []).append(r)
 
     category_summary: dict = {}
     for cat, cat_results in by_category.items():
@@ -286,7 +283,7 @@ def summarize_results(results: List[EvaluationResult]) -> EvaluationSummary:
 # ---------------------------------------------------------------------------
 
 def create_sample_dataset() -> List[EvaluationCase]:
-    """Return 10-15 diverse evaluation cases spanning categories and difficulties."""
+    """Return a diverse set of evaluation cases spanning categories and difficulties."""
     return [
         # --- Factual / Easy ---
         EvaluationCase(
