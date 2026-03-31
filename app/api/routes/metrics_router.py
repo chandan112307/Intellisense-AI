@@ -1,13 +1,15 @@
 """
 Metrics API router.
 
-Exposes endpoints for querying observability metrics and system health.
+Exposes endpoints for querying observability metrics, system health,
+and adaptive optimization signals.
 """
 
 from fastapi import APIRouter, HTTPException
 
 from app.core.logging import log_info, log_error
 from app.observability.metrics import (
+    get_adaptive_signals,
     get_health_status,
     get_metrics_summary,
     reset_metrics,
@@ -38,6 +40,22 @@ async def metrics_health():
     except Exception as e:
         log_error(f"Failed to retrieve health status: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve health status")
+
+
+@router.get("/adaptive-signals")
+async def adaptive_signals():
+    """Return active optimization signals that drive self-adjustment.
+
+    These signals indicate when the system should upgrade models,
+    expand retrieval, or reduce latency based on observed patterns.
+    """
+    try:
+        signals = get_adaptive_signals()
+        log_info("Adaptive signals requested")
+        return {"status": "ok", "signals": signals}
+    except Exception as e:
+        log_error(f"Failed to retrieve adaptive signals: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve adaptive signals")
 
 
 @router.post("/reset")

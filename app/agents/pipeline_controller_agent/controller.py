@@ -56,7 +56,7 @@ from app.rag.failure_predictor import predict_failure
 from app.intelligence.decision_engine import DecisionEngine, PipelineDecision
 from app.intelligence.unified_learning import get_unified_learning
 from app.intelligence.user_profile import get_user_profile, get_adaptive_params, record_interaction
-from app.observability.metrics import record_query as record_metrics
+from app.observability.metrics import record_query as record_metrics, get_adaptive_signals
 from app.cost.tracker import CostTracker, record_usage, select_model as cost_select_model
 from app.reasoning.engine import needs_multi_step, reason as run_reasoning
 from app.strategy.response_strategy import build_strategy_prompt_prefix, ResponseStrategy
@@ -693,6 +693,7 @@ class PipelineControllerAgent:
         latency_ms = int((time.time() - start_time) * 1000)
         confidence = self.response_synthesizer_agent_output.confidence
         success = confidence > 0.0 and "INSUFFICIENT" not in self.response_synthesizer_agent_output.answer
+        qt_value = query_type_result.query_type.value if hasattr(query_type_result, "query_type") else ""
 
         # ── Record to Unified Learning System ──
         try:
@@ -702,7 +703,7 @@ class PipelineControllerAgent:
             ))
             self.learning_system.record_retrieval_outcome(
                 query=effective_query,
-                query_type=query_type_result.query_type.value if hasattr(query_type_result, "query_type") else "",
+                query_type=qt_value,
                 chunk_types=chunk_types,
                 confidence=confidence,
                 recommendation="proceed" if success else "retry",
@@ -711,13 +712,60 @@ class PipelineControllerAgent:
         except Exception as e:
             log_info(f"Learning system record skipped: {e}")
 
+        # ── Record Decision Outcome (closes the decision learning loop) ──
+        try:
+            self.learning_system.record_decision_outcome(
+                query_type=qt_value,
+                model_name=model_name,
+                reasoning_type=decision.reasoning_type,
+                retrieval_strategy=decision.retrieval_strategy,
+                response_mode=decision.response_mode,
+                confidence=confidence,
+                success=success,
+                latency_ms=latency_ms,
+            )
+        except Exception as e:
+            log_info(f"Decision outcome record skipped: {e}")
+
+        # ── Record Failure Events (for failure learning) ──
+        if not success:
+            try:
+                failure_type = "low_confidence"
+                if grounded_only:
+                    failure_type = "grounded_mode"
+                elif confidence == 0.0:
+                    failure_type = "no_answer"
+                self.learning_system.record_failure(
+                    query_type=qt_value,
+                    failure_type=failure_type,
+                    model_name=model_name,
+                    retrieval_strategy=decision.retrieval_strategy,
+                    confidence=confidence,
+                    context_info=f"chunks={len(self.retrieval_agent_output.chunks)}",
+                )
+            except Exception as e:
+                log_info(f"Failure event record skipped: {e}")
+
+        # ── Record Reasoning Outcome (for reasoning evolution) ──
+        if reasoning_result:
+            try:
+                self.learning_system.record_reasoning_outcome(
+                    query_type=qt_value,
+                    reasoning_type=decision.reasoning_type,
+                    steps_count=len(reasoning_result.steps),
+                    confidence=reasoning_result.confidence,
+                    success=success,
+                )
+            except Exception as e:
+                log_info(f"Reasoning outcome record skipped: {e}")
+
         # ── Record Observability Metrics ──
         try:
             record_metrics(
                 latency_ms=latency_ms,
                 success=success,
                 grounded_mode=grounded_only,
-                query_type=query_type_result.query_type.value if hasattr(query_type_result, "query_type") else "unknown",
+                query_type=qt_value or "unknown",
                 tokens_used=self.response_synthesizer_agent_output.metrics.get("tokens", 0) if self.response_synthesizer_agent_output.metrics else 0,
             )
         except Exception as e:
@@ -739,7 +787,7 @@ class PipelineControllerAgent:
             record_interaction(
                 user_id=user_id,
                 query=query,
-                topic=query_type_result.query_type.value if hasattr(query_type_result, "query_type") else "general",
+                topic=qt_value or "general",
                 was_correct=success,
                 difficulty=decision.complexity,
             )

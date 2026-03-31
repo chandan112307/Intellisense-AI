@@ -5,6 +5,7 @@ Feedback API endpoints.
 POST /feedback/submit             — Submit user feedback on a response.
 GET  /feedback/stats              — Aggregate feedback counts (optionally per user).
 GET  /feedback/retrieval-boosts   — Chunk-level boost scores derived from feedback.
+GET  /feedback/learning-stats     — Learning system statistics.
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -57,7 +58,12 @@ class RetrievalBoostsResponse(BaseModel):
 
 @router.post("/submit", response_model=FeedbackSubmitResponse)
 async def submit_feedback(payload: FeedbackSubmitRequest):
-    """Submit user feedback for a query/response pair."""
+    """Submit user feedback for a query/response pair.
+
+    Feedback flows into multiple systems:
+    1. Legacy feedback_store (backward compatibility)
+    2. Unified Learning System (drives adaptive retrieval, model selection, confidence)
+    """
     try:
         # Store in legacy feedback_store for backward compatibility
         feedback_id = store_feedback(
@@ -113,3 +119,15 @@ async def retrieval_boosts():
     except Exception as e:
         log_error(f"Retrieval boosts failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to compute retrieval boosts")
+
+
+@router.get("/learning-stats")
+async def learning_stats():
+    """Return learning system statistics showing adaptive intelligence state."""
+    try:
+        learning = get_unified_learning()
+        stats = learning.get_learning_stats()
+        return {"status": "ok", "learning_stats": stats}
+    except Exception as e:
+        log_error(f"Learning stats failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve learning stats")

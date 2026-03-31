@@ -116,6 +116,59 @@ class UnifiedLearningSystem:
                     last_seen REAL NOT NULL,
                     best_chunk_ids TEXT DEFAULT '[]'
                 );
+
+                CREATE TABLE IF NOT EXISTS decision_outcomes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_type TEXT DEFAULT '',
+                    model_name TEXT NOT NULL,
+                    reasoning_type TEXT DEFAULT 'single',
+                    retrieval_strategy TEXT DEFAULT 'standard',
+                    response_mode TEXT DEFAULT 'teaching',
+                    confidence REAL DEFAULT 0.0,
+                    success INTEGER DEFAULT 0,
+                    feedback_score REAL DEFAULT 0.0,
+                    latency_ms INTEGER DEFAULT 0,
+                    timestamp REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_do_query_type
+                    ON decision_outcomes(query_type);
+                CREATE INDEX IF NOT EXISTS idx_do_model
+                    ON decision_outcomes(model_name);
+
+                CREATE TABLE IF NOT EXISTS model_performance (
+                    model_name TEXT NOT NULL,
+                    query_type TEXT NOT NULL,
+                    total_uses INTEGER DEFAULT 0,
+                    successes INTEGER DEFAULT 0,
+                    avg_confidence REAL DEFAULT 0.0,
+                    avg_feedback REAL DEFAULT 0.0,
+                    avg_latency_ms REAL DEFAULT 0.0,
+                    last_used REAL DEFAULT 0.0,
+                    PRIMARY KEY (model_name, query_type)
+                );
+
+                CREATE TABLE IF NOT EXISTS failure_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_type TEXT DEFAULT '',
+                    failure_type TEXT NOT NULL,
+                    model_name TEXT DEFAULT '',
+                    retrieval_strategy TEXT DEFAULT '',
+                    confidence REAL DEFAULT 0.0,
+                    context_info TEXT DEFAULT '',
+                    timestamp REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_fe_type
+                    ON failure_events(failure_type);
+
+                CREATE TABLE IF NOT EXISTS reasoning_outcomes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_type TEXT DEFAULT '',
+                    reasoning_type TEXT DEFAULT 'single',
+                    steps_count INTEGER DEFAULT 1,
+                    confidence REAL DEFAULT 0.0,
+                    success INTEGER DEFAULT 0,
+                    timestamp REAL NOT NULL
+                );
             """)
             self._conn.commit()
 
@@ -335,6 +388,205 @@ class UnifiedLearningSystem:
             ).fetchall()
         return [r[0] for r in rows]
 
+    # ── Decision Learning ──
+
+    def record_decision_outcome(
+        self,
+        query_type: str,
+        model_name: str,
+        reasoning_type: str,
+        retrieval_strategy: str,
+        response_mode: str,
+        confidence: float,
+        success: bool,
+        latency_ms: int = 0,
+    ):
+        """Log a pipeline decision and its outcome for learning."""
+        now = time.time()
+        with self._db_lock:
+            self._conn.execute(
+                """INSERT INTO decision_outcomes
+                   (query_type, model_name, reasoning_type, retrieval_strategy,
+                    response_mode, confidence, success, latency_ms, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (query_type, model_name, reasoning_type, retrieval_strategy,
+                 response_mode, confidence, int(success), latency_ms, now),
+            )
+            # Update model performance aggregates
+            row = self._conn.execute(
+                "SELECT total_uses, successes, avg_confidence, avg_latency_ms FROM model_performance WHERE model_name = ? AND query_type = ?",
+                (model_name, query_type),
+            ).fetchone()
+            if row:
+                uses = row[0] + 1
+                new_succ = row[1] + (1 if success else 0)
+                new_conf = (row[2] * row[0] + confidence) / uses
+                new_lat = (row[3] * row[0] + latency_ms) / uses
+                self._conn.execute(
+                    """UPDATE model_performance SET total_uses = ?, successes = ?,
+                       avg_confidence = ?, avg_latency_ms = ?, last_used = ?
+                       WHERE model_name = ? AND query_type = ?""",
+                    (uses, new_succ, new_conf, new_lat, now, model_name, query_type),
+                )
+            else:
+                self._conn.execute(
+                    """INSERT INTO model_performance
+                       (model_name, query_type, total_uses, successes, avg_confidence,
+                        avg_latency_ms, last_used)
+                       VALUES (?, ?, 1, ?, ?, ?, ?)""",
+                    (model_name, query_type, int(success), confidence, float(latency_ms), now),
+                )
+            self._conn.commit()
+
+    def get_best_model_for_query_type(self, query_type: str) -> Optional[str]:
+        """Return the model with best success rate for a query type.
+
+        Requires at least 3 uses to recommend. Returns None if insufficient data.
+        """
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT model_name, total_uses, successes, avg_confidence
+                   FROM model_performance
+                   WHERE query_type = ? AND total_uses >= 3
+                   ORDER BY (CAST(successes AS REAL) / total_uses) DESC, avg_confidence DESC
+                   LIMIT 1""",
+                (query_type,),
+            ).fetchall()
+        if rows:
+            return rows[0][0]
+        return None
+
+    def get_best_strategy_for_query_type(self, query_type: str) -> Optional[str]:
+        """Return the retrieval strategy with best success rate for a query type."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT retrieval_strategy,
+                       COUNT(*) as cnt,
+                       AVG(confidence) as avg_conf,
+                       SUM(success) as wins
+                   FROM decision_outcomes
+                   WHERE query_type = ? AND confidence > 0
+                   GROUP BY retrieval_strategy
+                   HAVING cnt >= 3
+                   ORDER BY (CAST(wins AS REAL) / cnt) DESC, avg_conf DESC
+                   LIMIT 1""",
+                (query_type,),
+            ).fetchall()
+        if rows:
+            return rows[0][0]
+        return None
+
+    def get_adaptive_top_k(self, query_type: str, base_top_k: int = 5) -> int:
+        """Return an adjusted top_k based on historical success rates.
+
+        If past retrievals for this query type had low confidence, increase top_k.
+        If consistently high confidence, can reduce to save latency.
+        """
+        with self._db_lock:
+            row = self._conn.execute(
+                """SELECT AVG(confidence), COUNT(*)
+                   FROM retrieval_outcomes
+                   WHERE query_type = ? AND timestamp > ?""",
+                (query_type, time.time() - self._decay_days * 86400),
+            ).fetchone()
+        if not row or not row[1] or row[1] < 3:
+            return base_top_k
+        avg_conf = row[0]
+        if avg_conf < 0.4:
+            return min(base_top_k + 4, 15)  # Expand retrieval for low confidence
+        if avg_conf > 0.8:
+            return max(base_top_k - 1, 3)   # Can retrieve less for high confidence
+        return base_top_k
+
+    # ── Failure Learning ──
+
+    def record_failure(
+        self,
+        query_type: str,
+        failure_type: str,
+        model_name: str = "",
+        retrieval_strategy: str = "",
+        confidence: float = 0.0,
+        context_info: str = "",
+    ):
+        """Record a failure event for learning."""
+        now = time.time()
+        with self._db_lock:
+            self._conn.execute(
+                """INSERT INTO failure_events
+                   (query_type, failure_type, model_name, retrieval_strategy,
+                    confidence, context_info, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (query_type, failure_type, model_name, retrieval_strategy,
+                 confidence, context_info, now),
+            )
+            self._conn.commit()
+
+    def get_failure_rate_by_type(self, query_type: str, window_days: int = 7) -> Dict[str, float]:
+        """Get failure rates by failure_type for a query type within a time window."""
+        cutoff = time.time() - window_days * 86400
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT failure_type, COUNT(*) FROM failure_events
+                   WHERE query_type = ? AND timestamp > ?
+                   GROUP BY failure_type""",
+                (query_type, cutoff),
+            ).fetchall()
+            total = self._conn.execute(
+                """SELECT COUNT(*) FROM decision_outcomes
+                   WHERE query_type = ? AND timestamp > ?""",
+                (query_type, cutoff),
+            ).fetchone()[0]
+        if total == 0:
+            return {}
+        return {ft: count / total for ft, count in rows}
+
+    def should_upgrade_model(self, query_type: str) -> bool:
+        """Check if failures suggest upgrading to a better model."""
+        failure_rates = self.get_failure_rate_by_type(query_type)
+        total_failure = sum(failure_rates.values())
+        return total_failure > 0.3  # >30% failure rate triggers upgrade
+
+    # ── Reasoning Outcomes ──
+
+    def record_reasoning_outcome(
+        self,
+        query_type: str,
+        reasoning_type: str,
+        steps_count: int,
+        confidence: float,
+        success: bool,
+    ):
+        """Record a reasoning outcome for learning."""
+        with self._db_lock:
+            self._conn.execute(
+                """INSERT INTO reasoning_outcomes
+                   (query_type, reasoning_type, steps_count, confidence, success, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (query_type, reasoning_type, steps_count, confidence, int(success), time.time()),
+            )
+            self._conn.commit()
+
+    def get_best_reasoning_type(self, query_type: str) -> Optional[str]:
+        """Return the reasoning type with best success rate for a query type."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT reasoning_type,
+                       COUNT(*) as cnt,
+                       SUM(success) as wins,
+                       AVG(confidence) as avg_conf
+                   FROM reasoning_outcomes
+                   WHERE query_type = ?
+                   GROUP BY reasoning_type
+                   HAVING cnt >= 2
+                   ORDER BY (CAST(wins AS REAL) / cnt) DESC, avg_conf DESC
+                   LIMIT 1""",
+                (query_type,),
+            ).fetchall()
+        if rows:
+            return rows[0][0]
+        return None
+
     # ── Flywheel Stats ──
 
     def get_learning_stats(self) -> Dict[str, Any]:
@@ -344,11 +596,19 @@ class UnifiedLearningSystem:
             fb_count = self._conn.execute("SELECT COUNT(*) FROM feedback_records").fetchone()[0]
             cp_count = self._conn.execute("SELECT COUNT(*) FROM chunk_performance").fetchone()[0]
             qp_count = self._conn.execute("SELECT COUNT(*) FROM query_patterns").fetchone()[0]
+            do_count = self._conn.execute("SELECT COUNT(*) FROM decision_outcomes").fetchone()[0]
+            mp_count = self._conn.execute("SELECT COUNT(*) FROM model_performance").fetchone()[0]
+            fe_count = self._conn.execute("SELECT COUNT(*) FROM failure_events").fetchone()[0]
+            reo_count = self._conn.execute("SELECT COUNT(*) FROM reasoning_outcomes").fetchone()[0]
         return {
             "retrieval_outcomes_recorded": ro_count,
             "feedback_records": fb_count,
             "tracked_chunks": cp_count,
             "unique_query_patterns": qp_count,
+            "decision_outcomes_logged": do_count,
+            "model_performance_entries": mp_count,
+            "failure_events": fe_count,
+            "reasoning_outcomes": reo_count,
         }
 
     def cleanup_old(self, days: Optional[int] = None):

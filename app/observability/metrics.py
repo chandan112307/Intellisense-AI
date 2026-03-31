@@ -145,6 +145,35 @@ class MetricsCollector:
                 "uptime_seconds": round(time.time() - self._start_time, 2),
             }
 
+    def get_adaptive_signals(self) -> dict:
+        """Return signals that can drive system self-optimization.
+
+        Returns recommendations based on observed metrics patterns:
+        - model_upgrade_needed: True if failure rate is high
+        - expand_retrieval: True if grounded mode triggers frequently
+        - reduce_latency: True if p95 latency exceeds threshold
+        """
+        with self._data_lock:
+            count = self.query_count
+            if count < 5:
+                return {"sufficient_data": False}
+
+            failure_rate = self.failed_queries / count
+            grounded_rate = self.grounded_mode_count / count
+            p50, p95, p99 = self._compute_percentiles()
+
+            signals = {
+                "sufficient_data": True,
+                "failure_rate": failure_rate,
+                "grounded_rate": grounded_rate,
+                "model_upgrade_needed": failure_rate > 0.20,
+                "expand_retrieval": grounded_rate > 0.30,
+                "reduce_latency": p95 > 8000,
+                "high_token_usage": (self.token_usage_total / count) > 800,
+                "p95_latency_ms": p95,
+            }
+            return signals
+
     def reset_metrics(self) -> None:
         """Reset all metrics. Intended for testing."""
         with self._data_lock:
@@ -202,6 +231,11 @@ def get_metrics_summary() -> dict:
 def get_health_status() -> dict:
     """Return system health status from the singleton collector."""
     return _collector.get_health_status()
+
+
+def get_adaptive_signals() -> dict:
+    """Return adaptive optimization signals from the singleton collector."""
+    return _collector.get_adaptive_signals()
 
 
 def reset_metrics() -> None:

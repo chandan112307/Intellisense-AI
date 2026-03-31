@@ -4,6 +4,9 @@ Central Decision Engine.
 The brain of the pipeline controller - decides which model to use,
 whether reasoning is required, which retrieval strategy to apply,
 which response mode to use, and whether to trigger tools.
+
+Now adaptive: consults UnifiedLearningSystem to learn from past decisions
+and adjust behavior dynamically based on historical outcomes.
 """
 
 from dataclasses import dataclass, field
@@ -50,7 +53,23 @@ class DecisionEngine:
     """
     Central decision-maker that consults user profile, query analysis,
     cost constraints, and system state to make pipeline decisions.
+
+    Adaptive: uses UnifiedLearningSystem to learn which decisions lead
+    to better outcomes and adjusts model/strategy selection over time.
     """
+
+    def __init__(self):
+        self._learning = None  # Lazy-loaded to avoid circular imports
+
+    def _get_learning(self):
+        """Lazy-load the learning system to avoid circular imports."""
+        if self._learning is None:
+            try:
+                from app.intelligence.unified_learning import get_unified_learning
+                self._learning = get_unified_learning()
+            except Exception:
+                self._learning = None
+        return self._learning
 
     def decide(
         self,
@@ -65,32 +84,26 @@ class DecisionEngine:
         """
         Make all pipeline decisions based on available signals.
 
-        Args:
-            query: The user's query text
-            user_id: User identifier
-            query_type: FACTUAL, CONCEPTUAL, COMPARATIVE, PROCEDURAL
-            intent: Query intent from classifier
-            knowledge_level: beginner, intermediate, advanced
-            preferences: User preferences dict
-            budget_remaining_pct: Remaining daily budget percentage
+        Consults historical learning data to adapt decisions dynamically.
         """
         decision = PipelineDecision()
         preferences = preferences or {}
         query_lower = query.lower().strip()
+        learning = self._get_learning()
 
-        # ── 1. Model Selection ──
+        # ── 1. Model Selection (adaptive) ──
         decision.model_name, decision.max_output_tokens = self._select_model(
-            query_type, query_lower, budget_remaining_pct, preferences
+            query_type, query_lower, budget_remaining_pct, preferences, learning
         )
 
-        # ── 2. Reasoning Decision ──
+        # ── 2. Reasoning Decision (adaptive) ──
         decision.needs_reasoning, decision.reasoning_type = self._decide_reasoning(
-            query_lower, query_type
+            query_lower, query_type, learning
         )
 
-        # ── 3. Retrieval Strategy ──
+        # ── 3. Retrieval Strategy (adaptive) ──
         decision.retrieval_strategy, decision.top_k_boost, decision.enable_gap_fill = (
-            self._decide_retrieval(query_type, query_lower, knowledge_level)
+            self._decide_retrieval(query_type, query_lower, knowledge_level, learning)
         )
 
         # ── 4. Response Strategy ──
@@ -123,8 +136,9 @@ class DecisionEngine:
         query_lower: str,
         budget_remaining_pct: float,
         preferences: Dict[str, Any],
+        learning,
     ) -> tuple:
-        """Select model based on query complexity and budget."""
+        """Select model based on query complexity, budget, and learned performance."""
         explicit_model = preferences.get("model_name")
         if explicit_model:
             return explicit_model, 600
@@ -133,7 +147,19 @@ class DecisionEngine:
         if budget_remaining_pct < 10:
             return "llama-3.1-8b-instant", 300
 
-        # Complexity-based
+        # ── Adaptive: check if learning system recommends a model ──
+        if learning and query_type:
+            learned_model = learning.get_best_model_for_query_type(query_type)
+            if learned_model:
+                log_info(f"Adaptive model selection: learned best={learned_model} for {query_type}")
+                return learned_model, 600
+
+            # Check if failures suggest upgrading
+            if learning.should_upgrade_model(query_type):
+                log_info(f"Adaptive: failure rate high for {query_type}, upgrading model")
+                return "llama-3.1-70b-versatile", 600
+
+        # ── Static fallback ──
         is_complex = query_type in ("COMPARATIVE", "PROCEDURAL") or any(
             kw in query_lower
             for kw in ["compare", "explain in detail", "analyze", "evaluate", "comprehensive"]
@@ -149,8 +175,8 @@ class DecisionEngine:
 
         return "llama-3.1-8b-instant", 400
 
-    def _decide_reasoning(self, query_lower: str, query_type: str) -> tuple:
-        """Decide if multi-step reasoning is needed."""
+    def _decide_reasoning(self, query_lower: str, query_type: str, learning) -> tuple:
+        """Decide if multi-step reasoning is needed, using historical patterns."""
         comparison_keywords = [
             "compare", "contrast", "difference between", "vs", "versus",
             "similarities", "pros and cons",
@@ -161,6 +187,13 @@ class DecisionEngine:
             query_type == "COMPARATIVE",
         ]
 
+        # ── Adaptive: check learned best reasoning type ──
+        if learning and query_type:
+            learned_reasoning = learning.get_best_reasoning_type(query_type)
+            if learned_reasoning and learned_reasoning != "single":
+                log_info(f"Adaptive reasoning: learned best={learned_reasoning} for {query_type}")
+                return True, learned_reasoning
+
         if any(kw in query_lower for kw in comparison_keywords):
             return True, "comparison"
         if sum(multi_step_signals) >= 2:
@@ -168,10 +201,23 @@ class DecisionEngine:
         return False, "single"
 
     def _decide_retrieval(
-        self, query_type: str, query_lower: str, knowledge_level: str
+        self, query_type: str, query_lower: str, knowledge_level: str, learning
     ) -> tuple:
-        """Decide retrieval strategy."""
-        # Advanced users get deeper retrieval
+        """Decide retrieval strategy, adaptively adjusting from learned data."""
+        # ── Adaptive: check learned best strategy ──
+        if learning and query_type:
+            learned_strategy = learning.get_best_strategy_for_query_type(query_type)
+            if learned_strategy:
+                log_info(f"Adaptive retrieval: learned best={learned_strategy} for {query_type}")
+                boost = 3 if learned_strategy == "expanded" else (8 if learned_strategy == "deep" else 0)
+                return learned_strategy, boost, True
+
+            # Adaptive top_k adjustment
+            adaptive_boost = learning.get_adaptive_top_k(query_type, base_top_k=0)
+            if adaptive_boost > 0:
+                log_info(f"Adaptive top_k boost: +{adaptive_boost} for {query_type}")
+
+        # ── Static fallback ──
         if knowledge_level == "advanced":
             return "expanded", 3, True
         if query_type in ("COMPARATIVE", "PROCEDURAL"):
