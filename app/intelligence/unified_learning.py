@@ -439,66 +439,183 @@ class UnifiedLearningSystem:
             self._conn.commit()
 
     def get_best_model_for_query_type(self, query_type: str) -> Optional[str]:
-        """Return the model with best success rate for a query type.
+        """Return the model with best weighted score for a query type.
 
-        Requires at least 3 uses to recommend. Returns None if insufficient data.
+        Uses weighted scoring (success_rate, confidence, recency) instead of
+        a fixed threshold. Returns None if insufficient data.
         """
         with self._db_lock:
             rows = self._conn.execute(
-                """SELECT model_name, total_uses, successes, avg_confidence
+                """SELECT model_name, total_uses, successes, avg_confidence, last_used
                    FROM model_performance
-                   WHERE query_type = ? AND total_uses >= 3
-                   ORDER BY (CAST(successes AS REAL) / total_uses) DESC, avg_confidence DESC
-                   LIMIT 1""",
+                   WHERE query_type = ? AND total_uses >= 1""",
                 (query_type,),
             ).fetchall()
-        if rows:
-            return rows[0][0]
-        return None
+        if not rows:
+            return None
+        now = time.time()
+        best_model = None
+        best_score = -1.0
+        for model_name, total_uses, successes, avg_conf, last_used in rows:
+            success_rate = successes / total_uses if total_uses > 0 else 0.0
+            age_days = (now - last_used) / 86400 if last_used else self._decay_days
+            recency = math.exp(-age_days / self._decay_days)
+            # Data sufficiency factor: ramps up smoothly from 0→1 as uses grow
+            sufficiency = 1.0 - math.exp(-total_uses / 2.0)
+            score = (0.4 * success_rate + 0.3 * avg_conf + 0.3 * recency) * sufficiency
+            if score > best_score:
+                best_score = score
+                best_model = model_name
+        # Require a minimum score to recommend
+        if best_score < 0.15:
+            return None
+        return best_model
 
     def get_best_strategy_for_query_type(self, query_type: str) -> Optional[str]:
-        """Return the retrieval strategy with best success rate for a query type."""
+        """Return the retrieval strategy with best weighted score for a query type.
+
+        Uses weighted scoring (success_rate, confidence, recency) instead of
+        a fixed threshold.
+        """
         with self._db_lock:
             rows = self._conn.execute(
                 """SELECT retrieval_strategy,
                        COUNT(*) as cnt,
                        AVG(confidence) as avg_conf,
-                       SUM(success) as wins
+                       SUM(success) as wins,
+                       MAX(timestamp) as last_ts
                    FROM decision_outcomes
                    WHERE query_type = ? AND confidence > 0
                    GROUP BY retrieval_strategy
-                   HAVING cnt >= 3
-                   ORDER BY (CAST(wins AS REAL) / cnt) DESC, avg_conf DESC
-                   LIMIT 1""",
+                   HAVING cnt >= 1""",
                 (query_type,),
             ).fetchall()
-        if rows:
-            return rows[0][0]
-        return None
+        if not rows:
+            return None
+        now = time.time()
+        best_strategy = None
+        best_score = -1.0
+        for strategy, cnt, avg_conf, wins, last_ts in rows:
+            success_rate = wins / cnt if cnt > 0 else 0.0
+            age_days = (now - last_ts) / 86400 if last_ts else self._decay_days
+            recency = math.exp(-age_days / self._decay_days)
+            sufficiency = 1.0 - math.exp(-cnt / 2.0)
+            score = (0.4 * success_rate + 0.3 * avg_conf + 0.3 * recency) * sufficiency
+            if score > best_score:
+                best_score = score
+                best_strategy = strategy
+        if best_score < 0.15:
+            return None
+        return best_strategy
 
     def get_adaptive_top_k(self, query_type: str, base_top_k: int = 5) -> int:
-        """Return an adjusted top_k based on historical success rates.
+        """Return an adjusted top_k based on recency-weighted historical success rates.
 
+        Uses exponential decay to weight recent outcomes more heavily.
         If past retrievals for this query type had low confidence, increase top_k.
         If consistently high confidence, can reduce to save latency.
         """
         with self._db_lock:
-            row = self._conn.execute(
-                """SELECT AVG(confidence), COUNT(*)
+            rows = self._conn.execute(
+                """SELECT confidence, timestamp
                    FROM retrieval_outcomes
                    WHERE query_type = ? AND timestamp > ?""",
                 (query_type, time.time() - self._decay_days * 86400),
-            ).fetchone()
-        if not row or not row[1] or row[1] < 3:
+            ).fetchall()
+        if not rows or len(rows) < 1:
             return base_top_k
-        avg_conf = row[0]
+        now = time.time()
+        weighted_sum = 0.0
+        weight_total = 0.0
+        for conf, ts in rows:
+            age_days = (now - ts) / 86400
+            w = math.exp(-age_days / self._decay_days)
+            weighted_sum += conf * w
+            weight_total += w
+        if weight_total == 0:
+            return base_top_k
+        avg_conf = weighted_sum / weight_total
         if avg_conf < 0.4:
             return min(base_top_k + 4, 15)  # Expand retrieval for low confidence
         if avg_conf > 0.8:
             return max(base_top_k - 1, 3)   # Can retrieve less for high confidence
         return base_top_k
 
+    def get_confidence_trend(self, query_type: str, window: int = 10) -> Optional[float]:
+        """Get the confidence trend for a query type from recent decision outcomes.
+
+        Returns a value between -1.0 (declining) and 1.0 (improving).
+        Returns None if insufficient data.
+        """
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT confidence, timestamp
+                   FROM decision_outcomes
+                   WHERE query_type = ?
+                   ORDER BY timestamp DESC
+                   LIMIT ?""",
+                (query_type, window),
+            ).fetchall()
+        if len(rows) < 2:
+            return None
+        # Compare first half (recent) vs second half (older)
+        mid = len(rows) // 2
+        recent_avg = sum(r[0] for r in rows[:mid]) / mid
+        older_avg = sum(r[0] for r in rows[mid:]) / (len(rows) - mid)
+        # Trend: positive means improving, negative means declining
+        return max(-1.0, min(1.0, recent_avg - older_avg))
+
+    def get_all_models_for_query_type(self, query_type: str) -> List[str]:
+        """Return all known model names for a given query type."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT model_name FROM model_performance WHERE query_type = ?",
+                (query_type,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_all_strategies_for_query_type(self, query_type: str) -> List[str]:
+        """Return all known retrieval strategies for a given query type."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT retrieval_strategy FROM decision_outcomes WHERE query_type = ?",
+                (query_type,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_all_reasoning_types_for_query_type(self, query_type: str) -> List[str]:
+        """Return all known reasoning types for a given query type."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT reasoning_type FROM reasoning_outcomes WHERE query_type = ?",
+                (query_type,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
     # ── Failure Learning ──
+
+    VALID_FAILURE_TYPES = ("retrieval_failure", "reasoning_failure", "model_failure", "tool_failure")
+
+    def classify_failure(
+        self,
+        confidence: float,
+        has_chunks: bool,
+        grounded_only: bool,
+        reasoning_failed: bool,
+        tool_failed: bool,
+    ) -> str:
+        """Classify a failure into one of the standard failure categories.
+
+        Categories: retrieval_failure, reasoning_failure, model_failure, tool_failure.
+        """
+        if tool_failed:
+            return "tool_failure"
+        if not has_chunks or (confidence == 0.0 and not grounded_only):
+            return "retrieval_failure"
+        if reasoning_failed:
+            return "reasoning_failure"
+        # Default: blame the model (low confidence with chunks present)
+        return "model_failure"
 
     def record_failure(
         self,
@@ -568,24 +685,41 @@ class UnifiedLearningSystem:
             self._conn.commit()
 
     def get_best_reasoning_type(self, query_type: str) -> Optional[str]:
-        """Return the reasoning type with best success rate for a query type."""
+        """Return the reasoning type with best weighted score for a query type.
+
+        Uses weighted scoring (success_rate, confidence, recency) instead of
+        a fixed threshold.
+        """
         with self._db_lock:
             rows = self._conn.execute(
                 """SELECT reasoning_type,
                        COUNT(*) as cnt,
                        SUM(success) as wins,
-                       AVG(confidence) as avg_conf
+                       AVG(confidence) as avg_conf,
+                       MAX(timestamp) as last_ts
                    FROM reasoning_outcomes
                    WHERE query_type = ?
                    GROUP BY reasoning_type
-                   HAVING cnt >= 2
-                   ORDER BY (CAST(wins AS REAL) / cnt) DESC, avg_conf DESC
-                   LIMIT 1""",
+                   HAVING cnt >= 1""",
                 (query_type,),
             ).fetchall()
-        if rows:
-            return rows[0][0]
-        return None
+        if not rows:
+            return None
+        now = time.time()
+        best_type = None
+        best_score = -1.0
+        for reasoning_type, cnt, wins, avg_conf, last_ts in rows:
+            success_rate = wins / cnt if cnt > 0 else 0.0
+            age_days = (now - last_ts) / 86400 if last_ts else self._decay_days
+            recency = math.exp(-age_days / self._decay_days)
+            sufficiency = 1.0 - math.exp(-cnt / 2.0)
+            score = (0.4 * success_rate + 0.3 * avg_conf + 0.3 * recency) * sufficiency
+            if score > best_score:
+                best_score = score
+                best_type = reasoning_type
+        if best_score < 0.15:
+            return None
+        return best_type
 
     # ── Flywheel Stats ──
 

@@ -7,12 +7,22 @@ which response mode to use, and whether to trigger tools.
 
 Now adaptive: consults UnifiedLearningSystem to learn from past decisions
 and adjust behavior dynamically based on historical outcomes.
+
+Uses epsilon-greedy exploration (80% exploit, 20% explore) for:
+  - model selection
+  - retrieval strategy
+  - reasoning type
 """
+
+import random
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from app.core.logging import log_info
+
+# Epsilon-greedy parameters
+EPSILON = 0.20  # 20% exploration, 80% exploitation
 
 
 @dataclass
@@ -85,25 +95,45 @@ class DecisionEngine:
         Make all pipeline decisions based on available signals.
 
         Consults historical learning data to adapt decisions dynamically.
+        Decision features include query_type, query_length, knowledge_level,
+        and past confidence trends.
         """
         decision = PipelineDecision()
         preferences = preferences or {}
         query_lower = query.lower().strip()
         learning = self._get_learning()
 
-        # ── 1. Model Selection (adaptive) ──
+        # ── Decision Features ──
+        query_length = len(query_lower.split())
+        confidence_trend = None
+        if learning and query_type:
+            try:
+                confidence_trend = learning.get_confidence_trend(query_type)
+            except Exception:
+                confidence_trend = None
+
+        decision_features = {
+            "query_type": query_type,
+            "query_length": query_length,
+            "knowledge_level": knowledge_level,
+            "confidence_trend": confidence_trend,
+        }
+
+        # ── 1. Model Selection (adaptive + epsilon-greedy) ──
         decision.model_name, decision.max_output_tokens = self._select_model(
-            query_type, query_lower, budget_remaining_pct, preferences, learning
+            query_type, query_lower, budget_remaining_pct, preferences, learning,
+            decision_features,
         )
 
-        # ── 2. Reasoning Decision (adaptive) ──
+        # ── 2. Reasoning Decision (adaptive + epsilon-greedy) ──
         decision.needs_reasoning, decision.reasoning_type = self._decide_reasoning(
-            query_lower, query_type, learning
+            query_lower, query_type, learning, decision_features,
         )
 
-        # ── 3. Retrieval Strategy (adaptive) ──
+        # ── 3. Retrieval Strategy (adaptive + epsilon-greedy) ──
         decision.retrieval_strategy, decision.top_k_boost, decision.enable_gap_fill = (
-            self._decide_retrieval(query_type, query_lower, knowledge_level, learning)
+            self._decide_retrieval(query_type, query_lower, knowledge_level, learning,
+                                   decision_features)
         )
 
         # ── 4. Response Strategy ──
@@ -137,8 +167,10 @@ class DecisionEngine:
         budget_remaining_pct: float,
         preferences: Dict[str, Any],
         learning,
+        decision_features: Dict[str, Any],
     ) -> tuple:
-        """Select model based on query complexity, budget, and learned performance."""
+        """Select model based on query complexity, budget, learned performance,
+        and epsilon-greedy exploration."""
         explicit_model = preferences.get("model_name")
         if explicit_model:
             return explicit_model, 600
@@ -147,9 +179,30 @@ class DecisionEngine:
         if budget_remaining_pct < 10:
             return "llama-3.1-8b-instant", 300
 
+        # ── Decision features: upgrade for long queries or declining confidence ──
+        query_length = decision_features.get("query_length", 0)
+        confidence_trend = decision_features.get("confidence_trend")
+        knowledge_level = decision_features.get("knowledge_level", "intermediate")
+
+        feature_upgrade = False
+        if query_length > 25 or knowledge_level == "advanced":
+            feature_upgrade = True
+        if confidence_trend is not None and confidence_trend < -0.15:
+            feature_upgrade = True
+
         # ── Adaptive: check if learning system recommends a model ──
         if learning and query_type:
             learned_model = learning.get_best_model_for_query_type(query_type)
+
+            # ── Epsilon-greedy: 20% explore alternative models ──
+            if learned_model and random.random() < EPSILON:
+                alternatives = learning.get_all_models_for_query_type(query_type)
+                alternatives = [m for m in alternatives if m != learned_model]
+                if alternatives:
+                    explored = random.choice(alternatives)
+                    log_info(f"Epsilon-greedy explore: model={explored} (instead of {learned_model})")
+                    return explored, 600
+
             if learned_model:
                 log_info(f"Adaptive model selection: learned best={learned_model} for {query_type}")
                 return learned_model, 600
@@ -159,7 +212,7 @@ class DecisionEngine:
                 log_info(f"Adaptive: failure rate high for {query_type}, upgrading model")
                 return "llama-3.1-70b-versatile", 600
 
-        # ── Static fallback ──
+        # ── Static fallback (influenced by decision features) ──
         is_complex = query_type in ("COMPARATIVE", "PROCEDURAL") or any(
             kw in query_lower
             for kw in ["compare", "explain in detail", "analyze", "evaluate", "comprehensive"]
@@ -168,15 +221,15 @@ class DecisionEngine:
             kw in query_lower for kw in ["verify", "fact check", "is it true"]
         )
 
-        if is_verification:
-            return "llama-3.1-70b-versatile", 600
-        if is_complex:
+        if is_verification or is_complex or feature_upgrade:
             return "llama-3.1-70b-versatile", 600
 
         return "llama-3.1-8b-instant", 400
 
-    def _decide_reasoning(self, query_lower: str, query_type: str, learning) -> tuple:
-        """Decide if multi-step reasoning is needed, using historical patterns."""
+    def _decide_reasoning(self, query_lower: str, query_type: str, learning,
+                          decision_features: Dict[str, Any]) -> tuple:
+        """Decide if multi-step reasoning is needed, using historical patterns
+        and epsilon-greedy exploration."""
         comparison_keywords = [
             "compare", "contrast", "difference between", "vs", "versus",
             "similarities", "pros and cons",
@@ -187,9 +240,27 @@ class DecisionEngine:
             query_type == "COMPARATIVE",
         ]
 
+        # ── Decision features: long queries or declining trends favor multi-step ──
+        query_length = decision_features.get("query_length", 0)
+        confidence_trend = decision_features.get("confidence_trend")
+        if query_length > 20:
+            multi_step_signals.append(True)
+        if confidence_trend is not None and confidence_trend < -0.1:
+            multi_step_signals.append(True)
+
         # ── Adaptive: check learned best reasoning type ──
         if learning and query_type:
             learned_reasoning = learning.get_best_reasoning_type(query_type)
+
+            # ── Epsilon-greedy: 20% explore alternative reasoning types ──
+            if learned_reasoning and learned_reasoning != "single" and random.random() < EPSILON:
+                alternatives = learning.get_all_reasoning_types_for_query_type(query_type)
+                alternatives = [r for r in alternatives if r != learned_reasoning]
+                if alternatives:
+                    explored = random.choice(alternatives)
+                    log_info(f"Epsilon-greedy explore: reasoning={explored} (instead of {learned_reasoning})")
+                    return explored != "single", explored
+
             if learned_reasoning and learned_reasoning != "single":
                 log_info(f"Adaptive reasoning: learned best={learned_reasoning} for {query_type}")
                 return True, learned_reasoning
@@ -201,12 +272,29 @@ class DecisionEngine:
         return False, "single"
 
     def _decide_retrieval(
-        self, query_type: str, query_lower: str, knowledge_level: str, learning
+        self, query_type: str, query_lower: str, knowledge_level: str, learning,
+        decision_features: Dict[str, Any],
     ) -> tuple:
-        """Decide retrieval strategy, adaptively adjusting from learned data."""
+        """Decide retrieval strategy, adaptively adjusting from learned data,
+        with epsilon-greedy exploration and decision features."""
+        # ── Decision features ──
+        query_length = decision_features.get("query_length", 0)
+        confidence_trend = decision_features.get("confidence_trend")
+
         # ── Adaptive: check learned best strategy ──
         if learning and query_type:
             learned_strategy = learning.get_best_strategy_for_query_type(query_type)
+
+            # ── Epsilon-greedy: 20% explore alternative strategies ──
+            if learned_strategy and random.random() < EPSILON:
+                alternatives = learning.get_all_strategies_for_query_type(query_type)
+                alternatives = [s for s in alternatives if s != learned_strategy]
+                if alternatives:
+                    explored = random.choice(alternatives)
+                    boost = 3 if explored == "expanded" else (8 if explored == "deep" else 0)
+                    log_info(f"Epsilon-greedy explore: strategy={explored} (instead of {learned_strategy})")
+                    return explored, boost, True
+
             if learned_strategy:
                 log_info(f"Adaptive retrieval: learned best={learned_strategy} for {query_type}")
                 boost = 3 if learned_strategy == "expanded" else (8 if learned_strategy == "deep" else 0)
@@ -216,6 +304,12 @@ class DecisionEngine:
             adaptive_boost = learning.get_adaptive_top_k(query_type, base_top_k=0)
             if adaptive_boost > 0:
                 log_info(f"Adaptive top_k boost: +{adaptive_boost} for {query_type}")
+
+        # ── Decision-feature influenced upgrades ──
+        if confidence_trend is not None and confidence_trend < -0.15:
+            return "expanded", 5, True
+        if query_length > 30:
+            return "expanded", 3, True
 
         # ── Static fallback ──
         if knowledge_level == "advanced":

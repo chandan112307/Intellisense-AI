@@ -727,21 +727,30 @@ class PipelineControllerAgent:
         except Exception as e:
             log_info(f"Decision outcome record skipped: {e}")
 
-        # ── Record Failure Events (for failure learning) ──
+        # ── Record Failure Events (with proper failure attribution) ──
         if not success:
             try:
-                failure_type = "low_confidence"
-                if grounded_only:
-                    failure_type = "grounded_mode"
-                elif confidence == 0.0:
-                    failure_type = "no_answer"
+                has_chunks = len(self.retrieval_agent_output.chunks) > 0
+                reasoning_failed = (
+                    decision.needs_reasoning and reasoning_result is None
+                )
+                tool_failed = (
+                    decision.tool_needed is not None and (tool_result is None or not tool_result.success)
+                )
+                failure_type = self.learning_system.classify_failure(
+                    confidence=confidence,
+                    has_chunks=has_chunks,
+                    grounded_only=grounded_only,
+                    reasoning_failed=reasoning_failed,
+                    tool_failed=tool_failed,
+                )
                 self.learning_system.record_failure(
                     query_type=qt_value,
                     failure_type=failure_type,
                     model_name=model_name,
                     retrieval_strategy=decision.retrieval_strategy,
                     confidence=confidence,
-                    context_info=f"chunks={len(self.retrieval_agent_output.chunks)}",
+                    context_info=f"chunks={len(self.retrieval_agent_output.chunks)},grounded={grounded_only}",
                 )
             except Exception as e:
                 log_info(f"Failure event record skipped: {e}")
