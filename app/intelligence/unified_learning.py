@@ -460,13 +460,14 @@ class UnifiedLearningSystem:
             success_rate = successes / total_uses if total_uses > 0 else 0.0
             age_days = (now - last_used) / 86400 if last_used else self._decay_days
             recency = math.exp(-age_days / self._decay_days)
-            # Data sufficiency factor: ramps up smoothly from 0→1 as uses grow
+            # Data sufficiency factor: asymptotically approaches 1.0 as uses grow
+            # (~0.39 at 1 use, ~0.63 at 2, ~0.78 at 3, ~0.95 at 6)
             sufficiency = 1.0 - math.exp(-total_uses / 2.0)
             score = (0.4 * success_rate + 0.3 * avg_conf + 0.3 * recency) * sufficiency
             if score > best_score:
                 best_score = score
                 best_model = model_name
-        # Require a minimum score to recommend
+        # Minimum viable recommendation threshold — below this, data is too weak
         if best_score < 0.15:
             return None
         return best_model
@@ -607,15 +608,19 @@ class UnifiedLearningSystem:
         """Classify a failure into one of the standard failure categories.
 
         Categories: retrieval_failure, reasoning_failure, model_failure, tool_failure.
+        Always returns a value from VALID_FAILURE_TYPES.
         """
         if tool_failed:
-            return "tool_failure"
-        if not has_chunks or (confidence == 0.0 and not grounded_only):
-            return "retrieval_failure"
-        if reasoning_failed:
-            return "reasoning_failure"
-        # Default: blame the model (low confidence with chunks present)
-        return "model_failure"
+            result = "tool_failure"
+        elif not has_chunks or (confidence == 0.0 and not grounded_only):
+            result = "retrieval_failure"
+        elif reasoning_failed:
+            result = "reasoning_failure"
+        else:
+            # Default: blame the model (low confidence with chunks present)
+            result = "model_failure"
+        assert result in self.VALID_FAILURE_TYPES
+        return result
 
     def record_failure(
         self,

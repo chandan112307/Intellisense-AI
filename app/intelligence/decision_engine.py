@@ -221,7 +221,8 @@ class DecisionEngine:
             kw in query_lower for kw in ["verify", "fact check", "is it true"]
         )
 
-        if is_verification or is_complex or feature_upgrade:
+        needs_upgraded_model = is_verification or is_complex or feature_upgrade
+        if needs_upgraded_model:
             return "llama-3.1-70b-versatile", 600
 
         return "llama-3.1-8b-instant", 400
@@ -253,7 +254,7 @@ class DecisionEngine:
             learned_reasoning = learning.get_best_reasoning_type(query_type)
 
             # ── Epsilon-greedy: 20% explore alternative reasoning types ──
-            if learned_reasoning and learned_reasoning != "single" and random.random() < EPSILON:
+            if learned_reasoning and random.random() < EPSILON:
                 alternatives = learning.get_all_reasoning_types_for_query_type(query_type)
                 alternatives = [r for r in alternatives if r != learned_reasoning]
                 if alternatives:
